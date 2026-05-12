@@ -1,0 +1,144 @@
+-- date — дата;
+-- country — країна;
+-- send_interval — інтервал відправлення;
+-- is_verified — перевірено акаунт чи ні;
+-- is_unsubscribed — підписник відписався;
+-- account_cnt — кількість створених акаунтів;
+-- sent_msg — кількість відправлених листів;
+-- open_msg — кількість відкритих листів;
+-- visit_msg — кількість переходів по листах;
+-- total_country_account_cnt — загальна кількість створених підписників по країні;
+-- total_country_sent_cnt — загальна кількість відправлених листів по країні;
+-- rank_total_country_account_cnt — рейтинг країн за кількістю створених підписників;
+-- rank_total_country_sent_cnt — рейтинг країн за кількістю відправлених листів.
+
+
+
+
+-- 1. first session_by accounts
+WITH first_sessions AS (
+SELECT
+    acs.account_id
+  , MIN(ses.date)          AS date
+  , MIN(ses.ga_session_id) AS first_ga_session_id
+FROM `data-analytics-mate.DA.account_session` acs
+JOIN `data-analytics-mate.DA.session` ses
+ USING(ga_session_id)
+GROUP BY acs.account_id
+),
+
+-- 2. metrics by account + country
+base AS (
+SELECT
+    acc.id
+  , fs.date
+  , sp.country
+  , acc.send_interval
+  , acc.is_verified
+  , acc.is_unsubscribed
+FROM `data-analytics-mate.DA.account` acc
+JOIN first_sessions fs
+ ON acc.id = fs.account_id
+JOIN `data-analytics-mate.DA.session_params` sp
+ ON fs.first_ga_session_id = sp.ga_session_id
+),
+
+-- 3. metrics by account + count id + prepare to union
+accounts AS (
+SELECT
+    date
+  , country
+  , send_interval
+  , is_verified
+  , is_unsubscribed
+  , COUNT(id) AS account_cnt
+  , 0         AS sent_msg
+  , 0         AS open_msg
+  , 0         AS visit_msg
+FROM base
+GROUP BY date
+       , country
+       , send_interval
+       , is_verified
+       , is_unsubscribed
+),
+
+-- 4. metrics by emails
+emails AS (
+SELECT
+    DATE_ADD(b.date, INTERVAL es.sent_date DAY) AS date
+  , b.country
+  , b.send_interval
+  , b.is_verified
+  , b.is_unsubscribed
+  , 0                    AS account_cnt
+  , COUNT(es.id_message) AS sent_msg
+  , COUNT(eo.id_message) AS open_msg
+  , COUNT(ev.id_message) AS visit_msg
+FROM base b
+JOIN `data-analytics-mate.DA.email_sent` es
+ ON b.id = es.id_account
+LEFT JOIN `data-analytics-mate.DA.email_open` eo
+ ON es.id_message = eo.id_message
+LEFT JOIN `data-analytics-mate.DA.email_visit` ev
+ ON es.id_message = ev.id_message
+GROUP BY date
+       , country
+       , send_interval
+       , is_verified
+       , is_unsubscribed
+),
+
+-- 5. union metrics + sum
+metrics AS (
+SELECT
+    date
+  , country
+  , send_interval
+  , is_verified
+  , is_unsubscribed
+  , SUM(account_cnt) AS account_cnt
+  , SUM(sent_msg)    AS sent_msg
+  , SUM(open_msg)    AS open_msg
+  , SUM(visit_msg)   AS visit_msg
+  , SUM(SUM(account_cnt)) OVER(PARTITION BY country) AS total_country_account_cnt
+  , SUM(SUM(sent_msg))    OVER(PARTITION BY country) AS total_country_sent_cnt
+FROM (
+ SELECT * FROM accounts
+ UNION ALL
+ SELECT * FROM emails
+)
+GROUP BY date
+        , country
+        , send_interval
+        , is_verified
+        , is_unsubscribed
+)
+
+-- 6. final
+SELECT
+  date
+, country
+, send_interval
+, is_verified
+, is_unsubscribed
+, account_cnt
+, sent_msg
+, open_msg
+, visit_msg
+, total_country_account_cnt
+, total_country_sent_cnt
+, DENSE_RANK() OVER(ORDER BY total_country_account_cnt DESC) AS rank_total_country_account_cnt
+, DENSE_RANK() OVER(ORDER BY total_country_sent_cnt     DESC) AS rank_total_country_sent_cnt
+FROM metrics
+QUALIFY
+  rank_total_country_account_cnt <= 10
+OR rank_total_country_sent_cnt    <= 10
+ORDER BY date
+
+
+
+
+
+
+
